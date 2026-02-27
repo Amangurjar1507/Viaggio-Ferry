@@ -266,42 +266,17 @@ exports.createAgentAllocation = async (req, res) => {
       createdAllocations.push(newAllocation)
 
       // Update availability cabins with allocated seats
+      // Agent allocations reduce public available seats but DO NOT reduce trip operational capacity
       for (const cabin of allocation.cabins) {
         const availabilityCabin = availability.cabins.find(c => c.cabin.toString() === cabin.cabin.toString())
         if (availabilityCabin) {
           availabilityCabin.allocatedSeats += cabin.allocatedSeats
-        }
-
-        // Update trip's per-cabin capacity details
-        const cabinIdStr = cabin.cabin.toString()
-        const seatsNum = cabin.allocatedSeats
-        let tripCapacityDetail = null
-
-        if (allocation.type === "passenger") {
-          tripCapacityDetail = trip.tripCapacityDetails.passenger.find(
-            detail => detail.cabinId.toString() === cabinIdStr
-          )
-        } else if (allocation.type === "cargo") {
-          tripCapacityDetail = trip.tripCapacityDetails.cargo.find(
-            detail => detail.cabinId.toString() === cabinIdStr
-          )
-        } else if (allocation.type === "vehicle") {
-          tripCapacityDetail = trip.tripCapacityDetails.vehicle.find(
-            detail => detail.cabinId.toString() === cabinIdStr
-          )
-        }
-
-        if (tripCapacityDetail) {
-          tripCapacityDetail.remainingSeat -= seatsNum
         }
       }
       
       // Save the updated availability for this type
       await availability.save()
     }
-    
-    // Save trip with updated capacity details
-    await trip.save()
 
     // Populate created allocations with details
     const populatedAllocations = await Promise.all(
@@ -339,9 +314,6 @@ exports.createAgentAllocation = async (req, res) => {
       message: "Agent allocations created successfully",
       data: {
         allocations: responseData,
-        updatedTrip: {
-          tripCapacityDetails: trip.tripCapacityDetails,
-        },
       },
     })
   } catch (error) {
@@ -379,35 +351,12 @@ exports.updateAgentAllocation = async (req, res) => {
     const trip = await Trip.findById(tripId)
     if (!trip) throw createHttpError(404, "Trip not found")
 
-    // Restore previous allocations from availability and trip
+    // Restore previous allocations from availability (agent allocations only affect availability, not trip capacity)
     for (const prevAllocation of allocation.allocations) {
       for (const cabin of prevAllocation.cabins) {
         const availabilityCabin = availability.cabins.find(c => c.cabin.toString() === cabin.cabin.toString())
         if (availabilityCabin) {
           availabilityCabin.allocatedSeats -= cabin.allocatedSeats
-        }
-
-        // Restore trip's per-cabin capacity
-        const cabinIdStr = cabin.cabin.toString()
-        const seatsNum = cabin.allocatedSeats
-        let tripCapacityDetail = null
-
-        if (prevAllocation.type === "passenger") {
-          tripCapacityDetail = trip.tripCapacityDetails.passenger.find(
-            detail => detail.cabinId.toString() === cabinIdStr
-          )
-        } else if (prevAllocation.type === "cargo") {
-          tripCapacityDetail = trip.tripCapacityDetails.cargo.find(
-            detail => detail.cabinId.toString() === cabinIdStr
-          )
-        } else if (prevAllocation.type === "vehicle") {
-          tripCapacityDetail = trip.tripCapacityDetails.vehicle.find(
-            detail => detail.cabinId.toString() === cabinIdStr
-          )
-        }
-
-        if (tripCapacityDetail) {
-          tripCapacityDetail.remainingSeat += seatsNum
         }
       }
     }
@@ -420,21 +369,6 @@ exports.updateAgentAllocation = async (req, res) => {
 
       if (!type || !cabinAllocations || !Array.isArray(cabinAllocations)) {
         throw createHttpError(400, `Invalid allocation format`)
-      }
-
-      let availableInTrip = 0
-      if (type === "passenger") {
-        availableInTrip = trip.tripCapacityDetails.passenger.reduce(
-          (sum, cap) => sum + cap.remainingSeat,
-          0
-        )
-      } else if (type === "cargo") {
-        availableInTrip = trip.tripCapacityDetails.cargo.reduce((sum, cap) => sum + cap.remainingSeat, 0)
-      } else if (type === "vehicle") {
-        availableInTrip = trip.tripCapacityDetails.vehicle.reduce(
-          (sum, cap) => sum + cap.remainingSeat,
-          0
-        )
       }
 
       const processedCabins = []
@@ -477,13 +411,6 @@ exports.updateAgentAllocation = async (req, res) => {
         })
       }
 
-      if (totalAllocatedSeats > availableInTrip) {
-        throw createHttpError(
-          400,
-          `Cannot allocate ${totalAllocatedSeats} total ${type} seats. Only ${availableInTrip} available.`
-        )
-      }
-
       processedAllocations.push({
         type,
         cabins: processedCabins,
@@ -496,40 +423,16 @@ exports.updateAgentAllocation = async (req, res) => {
     allocation.updatedBy = buildActor(user)
     await allocation.save()
 
-    // Apply new allocations to availability and trip
+    // Apply new allocations to availability (agent allocations only affect availability, not trip capacity)
     for (const newAllocation of processedAllocations) {
       for (const cabin of newAllocation.cabins) {
         const availabilityCabin = availability.cabins.find(c => c.cabin.toString() === cabin.cabin.toString())
         if (availabilityCabin) {
           availabilityCabin.allocatedSeats += cabin.allocatedSeats
         }
-
-        // Update trip's per-cabin capacity
-        const cabinIdStr = cabin.cabin.toString()
-        const seatsNum = cabin.allocatedSeats
-        let tripCapacityDetail = null
-
-        if (newAllocation.type === "passenger") {
-          tripCapacityDetail = trip.tripCapacityDetails.passenger.find(
-            detail => detail.cabinId.toString() === cabinIdStr
-          )
-        } else if (newAllocation.type === "cargo") {
-          tripCapacityDetail = trip.tripCapacityDetails.cargo.find(
-            detail => detail.cabinId.toString() === cabinIdStr
-          )
-        } else if (newAllocation.type === "vehicle") {
-          tripCapacityDetail = trip.tripCapacityDetails.vehicle.find(
-            detail => detail.cabinId.toString() === cabinIdStr
-          )
-        }
-
-        if (tripCapacityDetail) {
-          tripCapacityDetail.remainingSeat -= seatsNum
-        }
       }
     }
     await availability.save()
-    await trip.save()
 
     const updated = await AvailabilityAgentAllocation.findById(allocationId)
       .populate("agent", "name code type")
@@ -554,9 +457,6 @@ exports.updateAgentAllocation = async (req, res) => {
         availabilitySummary: {
           type: availability.type,
           cabins: availabilitySummary,
-        },
-        updatedTrip: {
-          tripCapacityDetails: trip.tripCapacityDetails,
         },
       },
     })
@@ -590,40 +490,17 @@ exports.deleteAgentAllocation = async (req, res) => {
     const trip = await Trip.findById(tripId)
     if (!trip) throw createHttpError(404, "Trip not found")
 
-    // Restore allocation seats back to availability and trip
+    // Restore allocation seats back to availability
+    // Agent allocations do NOT affect trip operational capacity, only restore available seats
     for (const allocationEntry of allocation.allocations) {
       for (const cabin of allocationEntry.cabins) {
         const availabilityCabin = availability.cabins.find(c => c.cabin.toString() === cabin.cabin.toString())
         if (availabilityCabin) {
           availabilityCabin.allocatedSeats -= cabin.allocatedSeats
         }
-
-        // Restore trip's per-cabin capacity
-        const cabinIdStr = cabin.cabin.toString()
-        const seatsNum = cabin.allocatedSeats
-        let tripCapacityDetail = null
-
-        if (allocationEntry.type === "passenger") {
-          tripCapacityDetail = trip.tripCapacityDetails.passenger.find(
-            detail => detail.cabinId.toString() === cabinIdStr
-          )
-        } else if (allocationEntry.type === "cargo") {
-          tripCapacityDetail = trip.tripCapacityDetails.cargo.find(
-            detail => detail.cabinId.toString() === cabinIdStr
-          )
-        } else if (allocationEntry.type === "vehicle") {
-          tripCapacityDetail = trip.tripCapacityDetails.vehicle.find(
-            detail => detail.cabinId.toString() === cabinIdStr
-          )
-        }
-
-        if (tripCapacityDetail) {
-          tripCapacityDetail.remainingSeat += seatsNum
-        }
       }
     }
     await availability.save()
-    await trip.save()
 
     allocation.isDeleted = true
     allocation.updatedBy = buildActor(user)
@@ -646,9 +523,6 @@ exports.deleteAgentAllocation = async (req, res) => {
         availabilitySummary: {
           type: availability.type,
           cabins: availabilitySummary,
-        },
-        updatedTrip: {
-          tripCapacityDetails: trip.tripCapacityDetails,
         },
       },
     })
