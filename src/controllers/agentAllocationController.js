@@ -143,6 +143,14 @@ exports.createAgentAllocation = async (req, res) => {
         throw createHttpError(400, `Invalid allocation format. Each must have type and cabins array`)
       }
 
+      // Validate that the availability type matches the allocation type
+      if (availability.type !== type) {
+        throw createHttpError(
+          400,
+          `Allocation type "${type}" does not match availability type "${availability.type}"`
+        )
+      }
+
       // Get available seats for this type in the trip's capacity details
       let availableInTrip = 0
       if (type === "passenger") {
@@ -183,10 +191,16 @@ exports.createAgentAllocation = async (req, res) => {
 
         // Validate against availability cabins
         const availabilityCabin = availability.cabins.find(c => {
-          const cabinId = c.cabin._id ? c.cabin._id.toString() : c.cabin.toString()
-          return cabinId === cabin.toString()
+          const cabinId = c.cabin && c.cabin._id ? c.cabin._id.toString() : (c.cabin ? c.cabin.toString() : null)
+          const requestCabinId = cabin.toString()
+          return cabinId === requestCabinId
         })
         if (!availabilityCabin) {
+          console.log("[v0] Cabin lookup failed. Available cabins:", availability.cabins.map(c => ({
+            cabinId: c.cabin._id ? c.cabin._id.toString() : c.cabin.toString(),
+            cabinName: c.cabin.name
+          })))
+          console.log("[v0] Requested cabin:", cabin.toString())
           throw createHttpError(
             400,
             `Cabin ${cabinDoc.name} is not available in this availability for allocation`
