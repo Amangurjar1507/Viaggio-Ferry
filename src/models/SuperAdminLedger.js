@@ -24,6 +24,7 @@ const SuperAdminLedgerSchema = new mongoose.Schema(
       uppercase: true,
       trim: true,
       match: /^\d{2}-\d{5}$/,
+      index: false,
     },
     ledgerSequenceNumber: {
       type: Number,
@@ -92,7 +93,6 @@ const SuperAdminLedgerSchema = new mongoose.Schema(
 )
 
 // Indexes for query optimization
-SuperAdminLedgerSchema.index({ ledgerCode: 1 }, { unique: true })
 SuperAdminLedgerSchema.index({ ledgerType: 1, status: 1 })
 SuperAdminLedgerSchema.index({ ledgerDescription: "text", ledgerCode: "text" })
 

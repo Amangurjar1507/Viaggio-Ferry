@@ -57,8 +57,7 @@ const TermsAndConditionsSchema = new mongoose.Schema(
   { timestamps: true },
 )
 
-// Index for fast company lookups
-TermsAndConditionsSchema.index({ companyId: 1 })
+// Index for query optimization
 TermsAndConditionsSchema.index({ status: 1 })
 
 module.exports = mongoose.model("TermsAndConditions", TermsAndConditionsSchema)
