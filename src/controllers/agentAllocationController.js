@@ -116,14 +116,6 @@ exports.createAgentAllocation = async (req, res) => {
     })
     if (!trip) throw createHttpError(404, "Trip not found")
 
-    const availability = await TripAvailability.findOne({
-      _id: availabilityId,
-      company: companyId,
-      trip: tripId,
-      isDeleted: false,
-    }).populate("cabins.cabin", "name type")
-    if (!availability) throw createHttpError(404, "Availability not found")
-
     // Verify agent exists and belongs to company
     const agentDoc = await Partner.findOne({
       _id: agent,
@@ -143,11 +135,18 @@ exports.createAgentAllocation = async (req, res) => {
         throw createHttpError(400, `Invalid allocation format. Each must have type and cabins array`)
       }
 
-      // Validate that the availability type matches the allocation type
-      if (availability.type !== type) {
+      // Fetch the correct availability for this allocation type
+      const availability = await TripAvailability.findOne({
+        trip: tripId,
+        company: companyId,
+        type: type, // Fetch availability matching the allocation type
+        isDeleted: false,
+      }).populate("cabins.cabin", "name type")
+      
+      if (!availability) {
         throw createHttpError(
-          400,
-          `Allocation type "${type}" does not match availability type "${availability.type}"`
+          404,
+          `No ${type} availability found for this trip`
         )
       }
 
@@ -235,21 +234,38 @@ exports.createAgentAllocation = async (req, res) => {
       })
     }
 
-    // Create agent allocation
-    const allocationData = {
-      company: companyId,
-      trip: tripId,
-      availability: availabilityId,
-      agent,
-      allocations: processedAllocations,
-      createdBy: buildActor(user),
-    }
-
-    const newAllocation = new AvailabilityAgentAllocation(allocationData)
-    await newAllocation.save()
-
-    // Update availability cabins with allocated seats
+    // Create separate agent allocations for each availability type
+    const createdAllocations = []
+    
+    // Group allocations by availability ID to get the right availability for updates
+    const allocationsByAvailability = {}
+    
     for (const allocation of processedAllocations) {
+      // Fetch availability again for updates (we need the fresh reference for each type)
+      const availability = await TripAvailability.findOne({
+        trip: tripId,
+        company: companyId,
+        type: allocation.type,
+        isDeleted: false,
+      }).populate("cabins.cabin", "name type")
+      
+      if (!availability) continue // Already validated above
+      
+      // Create agent allocation for this type
+      const allocationData = {
+        company: companyId,
+        trip: tripId,
+        availability: availability._id,
+        agent,
+        allocations: [allocation], // Single allocation object for this type
+        createdBy: buildActor(user),
+      }
+
+      const newAllocation = new AvailabilityAgentAllocation(allocationData)
+      await newAllocation.save()
+      createdAllocations.push(newAllocation)
+
+      // Update availability cabins with allocated seats
       for (const cabin of allocation.cabins) {
         const availabilityCabin = availability.cabins.find(c => c.cabin.toString() === cabin.cabin.toString())
         if (availabilityCabin) {
@@ -279,34 +295,50 @@ exports.createAgentAllocation = async (req, res) => {
           tripCapacityDetail.remainingSeat -= seatsNum
         }
       }
+      
+      // Save the updated availability for this type
+      await availability.save()
     }
-    await availability.save()
+    
+    // Save trip with updated capacity details
     await trip.save()
 
-    const populatedAllocation = await AvailabilityAgentAllocation.findById(newAllocation._id)
-      .populate("agent", "name code type")
-      .populate("availability", "type cabins")
-      .populate("allocations.cabins.cabin", "name type")
+    // Populate created allocations with details
+    const populatedAllocations = await Promise.all(
+      createdAllocations.map(allocation =>
+        AvailabilityAgentAllocation.findById(allocation._id)
+          .populate("agent", "name code type")
+          .populate("availability", "type cabins")
+          .populate("allocations.cabins.cabin", "name type")
+      )
+    )
 
-    // Build availability summary with remaining seats
-    const availabilitySummary = availability.cabins.map(cabin => ({
-      cabin: cabin.cabin,
-      cabinName: cabin.cabin.name,
-      cabinType: cabin.cabin.type,
-      totalSeats: cabin.seats,
-      allocatedSeats: cabin.allocatedSeats,
-      remainingSeats: cabin.seats - cabin.allocatedSeats,
-    }))
+    // Build response with all created allocations
+    const responseData = populatedAllocations.map(allocation => {
+      const availability = allocation.availability
+      const availabilitySummary = availability.cabins.map(cabin => ({
+        cabin: cabin.cabin,
+        cabinName: cabin.cabin.name,
+        cabinType: cabin.cabin.type,
+        totalSeats: cabin.seats,
+        allocatedSeats: cabin.allocatedSeats,
+        remainingSeats: cabin.seats - cabin.allocatedSeats,
+      }))
 
-    res.status(201).json({
-      success: true,
-      message: "Agent allocation created successfully",
-      data: {
-        allocation: populatedAllocation,
+      return {
+        allocation,
         availabilitySummary: {
           type: availability.type,
           cabins: availabilitySummary,
         },
+      }
+    })
+
+    res.status(201).json({
+      success: true,
+      message: "Agent allocations created successfully",
+      data: {
+        allocations: responseData,
         updatedTrip: {
           tripCapacityDetails: trip.tripCapacityDetails,
         },
